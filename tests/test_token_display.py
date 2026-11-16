@@ -40,9 +40,7 @@ def test_session_summary_keeps_failed_and_unknown_attempts():
 def test_clear_token_history_removes_rows_and_resets_summary():
     tree = Mock()
     tree.get_children.return_value = ("first", "second")
-    view = SimpleNamespace(
-        token_records=[{"usage": None}], token_tree=tree, token_summary=Mock()
-    )
+    view = SimpleNamespace(token_records=[{"usage": None}], token_tree=tree, token_summary=Mock())
 
     App.clear_token_history(view)
 
