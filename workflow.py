@@ -6,6 +6,7 @@ import time
 import re
 from typing import TypedDict
 import requests
+from rate_limits import rate_limit_info
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.callbacks import UsageMetadataCallbackHandler
@@ -61,7 +62,7 @@ def error_message(exc, key=""):
         402: "Недостатньо кредитів у провайдера.",
         403: "Провайдер відхилив доступ до моделі.",
         404: "Модель або адреса API недоступна. Онови список моделей.",
-        429: "Ліміт запитів. Зачекай або вибери іншу модель.",
+        429: "Ліміт запитів API (429). Час очікування дивись у рядку лімітів над таблицею.",
     }
     if status in friendly:
         return friendly[status]
@@ -138,7 +139,6 @@ def validate_info(raw, word):
     info = make_info(raw, word)
     if is_phrase(word):
         info.lemma = word
-        info.form = word
     if "<b>" not in highlight(info.sentence, info.form, info.lemma):
         raise ValueError("У реченні немає цільового слова / виразу.")
     return info
@@ -158,6 +158,7 @@ class CardState(TypedDict, total=False):
     usage: dict
     usage_requests: int
     usage_records: list[dict]
+    rate_limit: dict
 
 
 def build_graph(s, key, anki, *, chain=None, tts=None, notify=None, stopped=None):
@@ -240,6 +241,9 @@ def build_graph(s, key, anki, *, chain=None, tts=None, notify=None, stopped=None
                 record["status"] = "invalid"
         except Exception as exc:
             result["error"] = error_message(exc, key)
+            limit = rate_limit_info(exc)
+            if limit is not None:
+                result["rate_limit"] = limit
         totals = dict(state.get("usage", {}))
         if record["usage"] is not None:
             for name, count in record["usage"].items():

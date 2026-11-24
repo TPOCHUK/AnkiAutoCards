@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from anki_core import AnkiConnect, WordInfo, highlight, read_words
 from settings import Settings, import_env
@@ -316,8 +318,56 @@ def test_inflected_phrase_and_preferred_translation():
     )
     assert state["status"] == "ready"
     assert state["info"].lemma == "be supposed to"
-    assert state["info"].form == "be supposed to"
+    assert state["info"].form == "was supposed to"
     assert state["info"].translation == "мати щось зробити"
+
+
+@pytest.mark.parametrize(
+    "word,translation,form,sentence",
+    [
+        (
+            "manage to",
+            "зуміти, спромогтися",
+            "managed to",
+            "Despite the heavy rain, we managed to reach the station.",
+        ),
+        (
+            "make up one's mind",
+            "визначитися, прийняти рішення",
+            "made up my mind",
+            "I finally made up my mind to accept the job.",
+        ),
+        (
+            "come across",
+            "випадково натрапити",
+            "came across",
+            "I came across an old photograph while cleaning my room.",
+        ),
+    ],
+)
+def test_phrase_forms_preview_and_add(word, translation, form, sentence):
+    chain = Mock()
+    chain.invoke.return_value = json.dumps(
+        {"form": form, "translation": "ignored", "sentence": sentence}
+    )
+    api = Anki()
+    graph = build_graph(Settings(audio=False), "", api, chain=chain)
+    preview = graph.invoke(
+        {"word": f"{word} - {translation}", "mode": "preview", "check_anki": False}
+    )
+    assert preview["status"] == "ready", preview.get("error")
+    assert preview["attempts"] == 1
+    assert preview["info"] == WordInfo(word, form, translation, sentence)
+    request = chain.invoke.call_args.args[0]["request"]
+    assert "form: exact expression" in request
+
+    added = graph.invoke({"word": word, "info": preview["info"], "mode": "add"})
+    assert added["status"] == "added", added.get("error")
+    fields = api.added[0][1]
+    assert fields["Word"] == word
+    assert fields["Meaning"] == translation
+    assert f"<b>{form}</b>" in fields["Sentence"]
+    assert chain.invoke.call_count == 1
 
 
 def test_stop_during_rate_limit_does_not_call_model(monkeypatch):

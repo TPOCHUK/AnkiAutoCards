@@ -35,6 +35,7 @@ It removes the repetitive work of looking up translations, writing examples, pre
 - support for OpenAI, OpenRouter, Anthropic, and OpenAI-compatible APIs;
 - input/output token usage for every attempt and the entire session;
 - API key storage through Windows Credential Manager;
+- named API profiles with separate URLs, models, and credentials, switchable at the top of the window;
 - automatic deck and note-type creation without overwriting existing templates.
 
 | Metric | Value |
@@ -78,6 +79,13 @@ thrive
 I'm all ears
 look after — доглядати, піклуватися
 ```
+
+Use **New Profile** (`Новий профіль`) at the top of the window to add another API
+connection. Give it a name, enter its provider, API Base URL, API key and model in
+**Settings**, then click **Save**. The **API Profile** dropdown switches connections;
+the current settings are saved when switching. Keys stay in Windows Credential
+Manager (or in memory when remembering the key is disabled). Anki settings and
+existing previews are shared; each profile keeps its own API limit display.
 
 ## Development
 

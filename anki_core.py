@@ -282,9 +282,12 @@ sentence: natural English, 8-14 words, medium difficulty, vivid context that hel
 """
 
 PHRASE_PROMPT = """English flashcard for the spoken expression "{word}". JSON fields:
+form: exact expression as it appears in the sentence, including inflected verbs and adapted pronouns
 translation: natural {lang} equivalent, not literal, 2-6 words
 sentence: grammatical, conversational English, 6-16 words, context showing the expression's meaning
 Use the expression naturally; inflect verbs as needed.
+Replace placeholders such as one's with the appropriate possessive (my, your, his, her, our, their).
+For example: make up one's mind -> form: made up my mind.
 Parentheses mark optional or variable words: adapt them naturally. Choose one / alternative.
 Do not copy parentheses or / alternatives unless they are part of the actual expression.
 """

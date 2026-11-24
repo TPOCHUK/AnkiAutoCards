@@ -14,10 +14,12 @@ ROOT = (
 )
 DATA = Path(os.getenv("APPDATA") or Path.home() / ".config") / "AnkiAutoCards"
 CONFIG = DATA / "settings.json"
+PROFILE_FIELDS = ("provider", "base_url", "model", "max_tokens")
 
 
 @dataclass
 class Settings:
+    profile_id: str = "default"
     provider: str = "OpenRouter"
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = ""
@@ -96,6 +98,8 @@ def load():
 
 
 def account(s):
+    if s.profile_id != "default":
+        return "profile|" + s.profile_id
     return s.provider + "|" + s.base_url.rstrip("/")
 
 
@@ -108,10 +112,46 @@ def get_key(s):
         return ""
 
 
-def save(s, key, remember):
+def load_profiles(s):
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8")) if CONFIG.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    profiles = data.get("profiles", [])
+    profiles = profiles if isinstance(profiles, list) else []
+    profiles = [
+        dict(
+            {k: getattr(Settings(), k) for k in PROFILE_FIELDS},
+            **{k: p[k] for k in ("id", "name", "remember", *PROFILE_FIELDS) if k in p},
+        )
+        for p in profiles
+        if isinstance(p, dict) and p.get("id") and p.get("name")
+    ]
+    if not any(p["id"] == s.profile_id for p in profiles):
+        profiles.append(
+            dict(
+                id=s.profile_id,
+                name="Основний",
+                remember=True,
+                **{k: getattr(s, k) for k in PROFILE_FIELDS},
+            )
+        )
+    return profiles
+
+
+def save(s, key, remember, profiles=None):
+    profiles = load_profiles(s) if profiles is None else profiles
+    profiles = [dict(p) for p in profiles]
+    profile = next(p for p in profiles if p["id"] == s.profile_id)
+    profile.update({k: getattr(s, k) for k in PROFILE_FIELDS})
+    profile["remember"] = bool(remember)
     DATA.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG.with_suffix(".tmp")
-    tmp.write_text(json.dumps(asdict(s), ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(
+        json.dumps(dict(asdict(s), profiles=profiles), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     tmp.replace(CONFIG)
     try:
         import keyring

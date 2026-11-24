@@ -4,12 +4,14 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
+from uuid import uuid4
 from dataclasses import fields
 from pathlib import Path
 import settings
 from anki_core import AnkiConnect, read_words
 from workflow import build_graph, error_message, list_models, validate_info
+from rate_limits import format_rate_limit
 
 
 class App(tk.Tk):
@@ -27,6 +29,8 @@ class App(tk.Tk):
         self.models = []
         self.token_records = []
         self.token_summary = tk.StringVar(value="Ще немає запитів до моделі.")
+        self.rate_limit = None
+        self.rate_limit_summary = tk.StringVar(value="Ліміти API: ще немає даних від провайдера.")
         try:
             s, key = settings.load()
         except Exception:
@@ -48,6 +52,12 @@ class App(tk.Tk):
         }
         self.key = tk.StringVar(value=key)
         self.remember = tk.BooleanVar(value=True)
+        self.profiles = settings.load_profiles(s)
+        current = next(p for p in self.profiles if p["id"] == s.profile_id)
+        self.profile_name = tk.StringVar(value=current["name"])
+        self.remember.set(current.get("remember", True))
+        self.profile_keys = {s.profile_id: key}
+        self.profile_limits = {}
         self.free_only = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Встав слова → Створи перегляд → Перевір → Додай в Anki")
         self.progress = tk.DoubleVar(value=0)
@@ -64,6 +74,20 @@ class App(tk.Tk):
         ttk.Label(base, text="Слова, вирази, переклад і озвучка — в одному вікні.").pack(
             anchor="w", pady=(2, 12)
         )
+        profile_bar = ttk.Frame(base)
+        profile_bar.pack(fill="x", pady=(0, 10))
+        ttk.Label(profile_bar, text="Профіль API:").pack(side="left")
+        self.profile_box = ttk.Combobox(
+            profile_bar,
+            textvariable=self.profile_name,
+            state="readonly",
+            width=26,
+            values=[p["name"] for p in self.profiles],
+        )
+        self.profile_box.pack(side="left", padx=8)
+        self.profile_box.bind("<<ComboboxSelected>>", self.switch_profile)
+        self.action(profile_bar, "Новий профіль", self.new_profile).pack(side="left")
+        self.action(profile_bar, "Перейменувати", self.rename_profile).pack(side="left", padx=8)
         tabs = ttk.Notebook(base)
         tabs.pack(fill="both", expand=True)
         main = ttk.Frame(tabs, padding=12)
@@ -99,6 +123,9 @@ class App(tk.Tk):
         self.action(actions, "Прибрати вибрані", self.remove).pack(side="left")
         self.stop_btn = ttk.Button(actions, text="Зупинити", command=self.stop, state="disabled")
         self.stop_btn.pack(side="right")
+        ttk.Label(main, textvariable=self.rate_limit_summary, wraplength=780).pack(
+            anchor="w", pady=(0, 8)
+        )
         table = ttk.Frame(main)
         table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(
@@ -134,6 +161,7 @@ class App(tk.Tk):
         ttk.Progressbar(base, variable=self.progress, maximum=100).pack(fill="x", pady=(10, 5))
         ttk.Label(base, textvariable=self.status, wraplength=1000).pack(anchor="w")
         self.after(100, self.drain)
+        self.after(1000, self.refresh_rate_limit)
         self.protocol("WM_DELETE_WINDOW", self.close)
 
     def action(self, parent, text, command):
@@ -195,6 +223,8 @@ class App(tk.Tk):
                 widget = self.key_entry = ttk.Entry(frame, textvariable=self.key, show="•")
             else:
                 widget = ttk.Entry(frame, textvariable=self.vars[name])
+            if name != "provider":
+                widget.bind("<Control-KeyPress>", self.clipboard_shortcut)
             widget.grid(row=row, column=1, sticky="ew", pady=6)
         show = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -277,6 +307,10 @@ class App(tk.Tk):
 
     def publish_usage(self, result, s, source):
         # Workers send data; only drain() updates the table.
+        if result.get("rate_limit"):
+            self.events.put(
+                ("rate_limit", dict(result["rate_limit"], provider=s.provider, model=s.model))
+            )
         for record in result.get("usage_records", []):
             self.events.put(("usage", dict(record, model=s.model, source=source)))
 
@@ -341,12 +375,121 @@ class App(tk.Tk):
         self.models = []
         self.model_box.configure(values=[])
         s = settings.Settings(provider=provider, base_url=self.vars["base_url"].get())
-        self.key.set(settings.get_key(s))
+        self.key.set(settings.get_key(s) if self.vars["profile_id"].get() == "default" else "")
+
+    def persist_profile(self):
+        s, key = self.snapshot()
+        profile = next(p for p in self.profiles if p["id"] == s.profile_id)
+        profile.update({k: getattr(s, k) for k in settings.PROFILE_FIELDS})
+        profile["remember"] = self.remember.get()
+        message = settings.save(s, key, self.remember.get(), self.profiles)
+        self.profile_keys[s.profile_id] = key
+        return message
+
+    def apply_profile(self, profile):
+        old_id = self.vars["profile_id"].get()
+        self.profile_limits[old_id] = self.rate_limit
+        self.vars["profile_id"].set(profile["id"])
+        for name in settings.PROFILE_FIELDS:
+            self.vars[name].set(profile[name])
+        s = settings.Settings(
+            profile_id=profile["id"], provider=profile["provider"], base_url=profile["base_url"]
+        )
+        self.key.set(
+            self.profile_keys[profile["id"]]
+            if profile["id"] in self.profile_keys
+            else settings.get_key(s)
+        )
+        self.remember.set(profile.get("remember", True))
+        self.profile_name.set(profile["name"])
+        self.profile_box.configure(values=[p["name"] for p in self.profiles])
+        self.models = []
+        self.model_box.configure(values=[])
+        self.rate_limit = self.profile_limits.get(profile["id"])
+        self.rate_limit_summary.set(
+            format_rate_limit(self.rate_limit)
+            if self.rate_limit
+            else "Ліміти API: ще немає даних від провайдера для цього профілю."
+        )
+
+    def switch_profile(self, event=None):
+        current = next(p for p in self.profiles if p["id"] == self.vars["profile_id"].get())
+        if self.busy:
+            self.profile_name.set(current["name"])
+            return
+        target = next(p for p in self.profiles if p["name"] == self.profile_name.get())
+        try:
+            message = self.persist_profile()
+            self.apply_profile(target)
+            target_message = self.persist_profile()
+            messages = " ".join(dict.fromkeys((message, target_message)))
+            self.write_log(f"Обрано профіль: {target['name']}. {messages}")
+        except Exception as exc:
+            if self.vars["profile_id"].get() != current["id"]:
+                self.apply_profile(current)
+            self.profile_name.set(current["name"])
+            messagebox.showerror("Профілі", error_message(exc, self.key.get()))
+
+    def ask_profile_name(self, initial=""):
+        name = simpledialog.askstring(
+            "Профіль API", "Назва профілю:", initialvalue=initial, parent=self
+        )
+        if name is None:
+            return None
+        name = name.strip()
+        if not name or any(
+            p["name"].casefold() == name.casefold() and p["name"] != initial for p in self.profiles
+        ):
+            messagebox.showerror("Профілі", "Вкажи непорожню унікальну назву профілю.")
+            return None
+        return name
+
+    def new_profile(self):
+        if self.busy:
+            return
+        name = self.ask_profile_name()
+        if name is None:
+            return
+        try:
+            message = self.persist_profile()
+            defaults = settings.Settings()
+            profile = dict(
+                id=uuid4().hex,
+                name=name,
+                remember=True,
+                **{k: getattr(defaults, k) for k in settings.PROFILE_FIELDS},
+            )
+            self.profiles.append(profile)
+            self.profile_keys[profile["id"]] = ""
+            self.apply_profile(profile)
+            target_message = self.persist_profile()
+            messages = " ".join(dict.fromkeys((message, target_message)))
+            self.write_log(
+                f"Створено профіль «{name}». Введи URL, ключ і модель у налаштуваннях. {messages}"
+            )
+        except Exception as exc:
+            messagebox.showerror("Профілі", error_message(exc, self.key.get()))
+
+    def rename_profile(self):
+        if self.busy:
+            return
+        name = self.ask_profile_name(self.profile_name.get())
+        if name is None:
+            return
+        profile = next(p for p in self.profiles if p["id"] == self.vars["profile_id"].get())
+        old_name = profile["name"]
+        profile["name"] = name
+        try:
+            self.status.set(self.persist_profile())
+            self.profile_name.set(name)
+            self.profile_box.configure(values=[p["name"] for p in self.profiles])
+        except Exception as exc:
+            profile["name"] = old_name
+            messagebox.showerror("Профілі", error_message(exc, self.key.get()))
 
     def save_settings(self):
         try:
-            s, key = self.snapshot()
-            self.status.set(settings.save(s, key, self.remember.get()))
+            self.status.set(self.persist_profile())
         except Exception as exc:
             messagebox.showerror("Налаштування", error_message(exc, self.key.get()))
 
@@ -358,7 +501,8 @@ class App(tk.Tk):
             try:
                 s, key = settings.import_env(path)
                 for f in fields(s):
-                    self.vars[f.name].set(getattr(s, f.name))
+                    if f.name != "profile_id":
+                        self.vars[f.name].set(getattr(s, f.name))
                 self.key.set(key)
                 self.status.set(
                     ".env імпортовано. Натисни «Зберегти», щоб запам’ятати налаштування."
@@ -379,6 +523,7 @@ class App(tk.Tk):
         if self.busy:
             return
         self.busy = True
+        self.profile_box.configure(state="disabled")
         self.cancel.clear()
         self.progress.set(0)
         for btn in self.buttons:
@@ -488,6 +633,11 @@ class App(tk.Tk):
                 self.publish_usage(result, s, "Перегляд")
                 self.events.put(("card", result))
                 self.events.put(("progress", 100 * (index + 1) / len(words)))
+                if result.get("rate_limit"):
+                    self.events.put(
+                        ("log", "Перегляд зупинено через ліміт API. Решта слів не оброблялася.")
+                    )
+                    break
 
         self.start_job(work)
 
@@ -625,6 +775,14 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
         self.status.set(text)
 
+    def refresh_rate_limit(self):
+        if self.rate_limit is not None:
+            info = self.rate_limit
+            self.rate_limit_summary.set(
+                f"{info['provider']} / {info['model']}: " + format_rate_limit(info)
+            )
+        self.after(1000, self.refresh_rate_limit)
+
     def drain(self):
         """Забираємо події з черги й оновлюємо вікно в головному потоці."""
         try:
@@ -634,6 +792,11 @@ class App(tk.Tk):
                     self.write_log(value)
                 elif kind == "usage":
                     self.show_usage(value)
+                elif kind == "rate_limit":
+                    self.rate_limit = value
+                    self.rate_limit_summary.set(
+                        f"{value['provider']} / {value['model']}: " + format_rate_limit(value)
+                    )
                 elif kind == "error":
                     self.write_log(value)
                     messagebox.showerror("Операція не завершена", value)
@@ -661,6 +824,7 @@ class App(tk.Tk):
                     self.render_card(iid, state)
                 elif kind == "done":
                     self.busy = False
+                    self.profile_box.configure(state="readonly")
                     for btn in self.buttons:
                         btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
