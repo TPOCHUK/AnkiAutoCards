@@ -148,8 +148,8 @@ def test_legacy_env_and_credentials_not_in_json(tmp_path, monkeypatch):
     monkeypatch.setattr(keyring, "get_password", lambda *args: secret.get("value"))
     settings.save(s, key, True)
     assert secret["value"] == key
-    assert key not in (tmp_path / "settings.json").read_text()
-    assert env.read_text().startswith('OPENAI_API_KEY="private-key"')
+    assert key not in (tmp_path / "settings.json").read_text(encoding="utf-8")
+    assert env.read_text(encoding="utf-8").startswith('OPENAI_API_KEY="private-key"')
 
 
 def test_credentials_redacted_and_rate_limit():
